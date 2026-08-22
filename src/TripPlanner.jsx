@@ -139,6 +139,20 @@ function Field({ label, children }) {
 const inputStyle = { borderColor: "#E0E3EA", color: "#0F0F0F" };
 const inputClass = "w-full border rounded-xl p-3 text-sm";
 
+function Section({ title, count, open, onToggle, children }) {
+  return (
+    <div style={{ background: "#FFFFFF" }} className="rounded-2xl p-4 mb-4 shadow-sm">
+      <button onClick={onToggle} className="w-full flex items-center justify-between text-right">
+        <h2 style={{ fontFamily: "'Rubik', sans-serif", color: "#0F0F0F" }} className="text-lg font-bold">
+          {title}{count != null && <span style={{ color: "#9A9A9A" }} className="text-sm font-medium"> ({count})</span>}
+        </h2>
+        {open ? <ChevronUp size={18} color="#767676" /> : <ChevronDown size={18} color="#767676" />}
+      </button>
+      {open && <div className="mt-3">{children}</div>}
+    </div>
+  );
+}
+
 export default function TripPlanner({ data, persist, error, onSignOut, userEmail, tripId, onBack }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [expandedCat, setExpandedCat] = useState({});
@@ -152,6 +166,9 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
   const [selectedDate, setSelectedDate] = useState(null);
   const [destRegionFilter, setDestRegionFilter] = useState("all");
   const [destCatFilter, setDestCatFilter] = useState("all");
+  const [sections, setSections] = useState({ budget: true, dest: false, map: true, cal: true });
+  const toggleSection = (k) => setSections((s) => ({ ...s, [k]: !s[k] }));
+  const setAllSections = (v) => setSections({ budget: v, dest: v, map: v, cal: v });
 
   if (!data) {
     return (
@@ -194,9 +211,20 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
 
   const regions = ["all", ...new Set(destinations.map((d) => d.region).filter(Boolean))];
   const destCats = ["all", ...DEST_CATEGORIES.filter((c) => destinations.some((d) => d.category === c))];
-  const filteredDest = destinations.filter(
-    (d) => (destRegionFilter === "all" || d.region === destRegionFilter) && (destCatFilter === "all" || d.category === destCatFilter)
+  const destDates = {};
+  Object.entries(calendar || {}).forEach(([date, e]) =>
+    (e.items || []).forEach((it) => { if (it.destId) (destDates[it.destId] = destDates[it.destId] || []).push(date); })
   );
+  Object.values(destDates).forEach((a) => a.sort());
+  // scheduled first (by earliest calendar date), then unscheduled; ties by priority (high first)
+  const filteredDest = destinations
+    .filter((d) => (destRegionFilter === "all" || d.region === destRegionFilter) && (destCatFilter === "all" || d.category === destCatFilter))
+    .sort((a, b) => {
+      const da = destDates[a.id]?.[0] || "9999-99-99";
+      const db = destDates[b.id]?.[0] || "9999-99-99";
+      if (da !== db) return da < db ? -1 : 1;
+      return (Number(b.priority) || 0) - (Number(a.priority) || 0);
+    });
 
   function openNewExpense(categoryId) {
     setExpenseSheet({ id: null, categoryId: categoryId || categories[0]?.id || "", description: "", amount: "", currency: "EUR", date: todayISO(), status: "planned", refundable: "na", notes: "" });
@@ -320,11 +348,6 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
   const selEntry = selectedDate ? calendar[selectedDate] || { locationTag: "", items: [] } : null;
   const destByRegion = {};
   destinations.forEach((d) => { const r = d.region || "ללא אזור"; (destByRegion[r] = destByRegion[r] || []).push(d); });
-  const destDates = {};
-  Object.entries(calendar || {}).forEach(([date, e]) =>
-    (e.items || []).forEach((it) => { if (it.destId) (destDates[it.destId] = destDates[it.destId] || []).push(date); })
-  );
-  Object.values(destDates).forEach((a) => a.sort());
 
   return (
     <div dir="rtl" style={{ background: "#F2F4F8", minHeight: "100vh", fontFamily: "'Heebo', sans-serif" }}>
@@ -376,10 +399,18 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
       <div className="px-4 pt-4 pb-28">
         {error && <div style={{ background: "#FBEAF2", color: "#CC427B" }} className="rounded-xl p-3 text-xs mb-4">{error}</div>}
 
+        <div className="flex justify-end items-center gap-1 mb-2">
+          <button onClick={() => setAllSections(true)} style={{ color: "#767676" }} className="text-[11px] px-1.5 py-1">הרחבת הכל</button>
+          <span style={{ color: "#C8C8C8" }} className="text-[11px]">·</span>
+          <button onClick={() => setAllSections(false)} style={{ color: "#767676" }} className="text-[11px] px-1.5 py-1">כיווץ הכל</button>
+        </div>
+
         {/* BUDGET */}
-        <div style={{ background: "#FFFFFF" }} className="rounded-2xl p-4 mb-4 shadow-sm">
+        <Section title="תקציב" open={sections.budget} onToggle={() => toggleSection("budget")}>
           <div className="flex items-center justify-between mb-3">
-            <h2 style={{ fontFamily: "'Rubik', sans-serif", color: "#0F0F0F" }} className="text-lg font-bold">תקציב</h2>
+            <p style={{ color: "#0F0F0F" }} className="text-2xl font-bold">
+              {showAmount(totalSpent)} <span style={{ color: "#9A9A9A" }} className="text-base font-medium">/ {showAmount(totalBudget)}</span>
+            </p>
             <div className="flex gap-1">
               {["EUR", "ILS"].map((cur) => (
                 <button key={cur} onClick={() => setDisplayCurrency(cur)} style={{ background: displayCurrency === cur ? "#FF6935" : "#F2F4F8", color: displayCurrency === cur ? "#fff" : "#343434" }} className="px-3 py-1 rounded-full text-xs font-bold">
@@ -388,9 +419,6 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
               ))}
             </div>
           </div>
-          <p style={{ color: "#0F0F0F" }} className="text-2xl font-bold mb-3">
-            {showAmount(totalSpent)} <span style={{ color: "#9A9A9A" }} className="text-base font-medium">/ {showAmount(totalBudget)}</span>
-          </p>
 
           {pieData.length > 0 && (
             <div className="flex items-center gap-4 mb-3">
@@ -486,11 +514,11 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
             <button onClick={exportCSV} style={{ background: "#fff", border: "1px solid #E0E3EA", color: "#FF6935" }} className="flex-1 rounded-xl py-2 text-xs font-semibold flex items-center justify-center gap-1"><Download size={13} /> CSV</button>
             <button onClick={exportJSON} style={{ background: "#fff", border: "1px solid #E0E3EA", color: "#FF6935" }} className="flex-1 rounded-xl py-2 text-xs font-semibold flex items-center justify-center gap-1"><Download size={13} /> גיבוי JSON</button>
           </div>
-        </div>
+        </Section>
 
         {/* DESTINATIONS */}
-        <div style={{ background: "#FFFFFF" }} className="rounded-2xl p-4 mb-4 shadow-sm">
-          <h2 style={{ fontFamily: "'Rubik', sans-serif", color: "#0F0F0F" }} className="text-lg font-bold mb-3">מאגר יעדים <span style={{ color: "#9A9A9A" }} className="text-sm font-medium">({filteredDest.length})</span></h2>
+        <Section title="מאגר יעדים" count={filteredDest.length} open={sections.dest} onToggle={() => toggleSection("dest")}>
+          <p style={{ color: "#9A9A9A" }} className="text-[10px] mb-2">ממוין לפי התאריך ביומן, ואז לפי עדיפות</p>
           <div className="flex flex-wrap gap-1.5 mb-2">
             {destCats.map((c) => {
               const sel = destCatFilter === c;
@@ -580,20 +608,18 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
             </div>
           )}
           <button onClick={() => setDestSheet({ mode: "new", priority: "3" })} style={{ background: "#fff", border: "1px solid #E0E3EA", color: "#FF6935" }} className="w-full rounded-xl py-2 text-xs font-semibold mt-3">＋ יעד חדש</button>
-        </div>
+        </Section>
 
         {/* MAP */}
-        <div style={{ background: "#FFFFFF" }} className="rounded-2xl p-4 mb-4 shadow-sm">
-          <h2 style={{ fontFamily: "'Rubik', sans-serif", color: "#0F0F0F" }} className="text-lg font-bold mb-3">מפת היעדים</h2>
+        <Section title="מפת היעדים" open={sections.map} onToggle={() => toggleSection("map")}>
           <DestinationMap destinations={filteredDest} onCoords={setDestCoords} colorFor={destCategoryColor} />
           {(destCatFilter !== "all" || destRegionFilter !== "all") && (
             <p style={{ color: "#9A9A9A" }} className="text-[11px] mt-1.5">המפה מציגה רק את היעדים המסוננים ({filteredDest.length}).</p>
           )}
-        </div>
+        </Section>
 
         {/* CALENDAR */}
-        <div style={{ background: "#FFFFFF" }} className="rounded-2xl p-4 mb-4 shadow-sm">
-          <h2 style={{ fontFamily: "'Rubik', sans-serif", color: "#0F0F0F" }} className="text-lg font-bold mb-3">יומן · מה עושים כל יום</h2>
+        <Section title="יומן · מה עושים כל יום" open={sections.cal} onToggle={() => toggleSection("cal")}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "5px" }} className="mb-3">
             {HE_DAYS.map((l) => <div key={l} style={{ color: "#9A9A9A" }} className="text-center text-[11px] font-bold">{l}</div>)}
             {gridDates.map((iso) => {
@@ -665,7 +691,7 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
               <FreeItemInput onAdd={(text) => addFreeItem(selectedDate, text)} />
             </div>
           )}
-        </div>
+        </Section>
 
         <p style={{ color: "#9A9A9A" }} className="text-[11px] text-center">הנתונים משותפים ונשמרים אוטומטית — כל מי שפותח את הקישור הזה רואה ועורך אותם.</p>
       </div>
