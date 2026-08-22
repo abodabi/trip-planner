@@ -30,9 +30,48 @@ export function parseCoords(str) {
   return null;
 }
 
-function destCoords(d) {
+export function destCoords(d) {
   if (typeof d.lat === "number" && typeof d.lng === "number" && inArea(d)) return { lat: d.lat, lng: d.lng };
   return parseCoords(d.mapsLink);
+}
+
+// Mini-map for one day's plan: numbered stops connected in list order.
+// stops: [{ num, name, coords: {lat,lng} }]
+export function DayRouteMap({ stops }) {
+  const ref = useRef(null);
+  const mapRef = useRef(null);
+
+  useEffect(() => () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } }, []);
+
+  useEffect(() => {
+    if (!mapRef.current) {
+      const map = L.map(ref.current, { scrollWheelZoom: false });
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(map);
+      map.setView(TATRA_CENTER, 9);
+      map._routeLayer = L.layerGroup().addTo(map);
+      mapRef.current = map;
+    }
+    const map = mapRef.current, layer = map._routeLayer;
+    layer.clearLayers();
+    const pts = stops.map((s) => [s.coords.lat, s.coords.lng]);
+    if (pts.length > 1) {
+      L.polyline(pts, { color: "#1E4B3A", weight: 3, opacity: 0.65, dashArray: "6 8" }).addTo(layer);
+    }
+    stops.forEach((s) => {
+      L.marker([s.coords.lat, s.coords.lng], {
+        icon: L.divIcon({
+          className: "",
+          html: `<div style="width:24px;height:24px;border-radius:999px;background:#1E4B3A;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);color:#fff;font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center">${s.num}</div>`,
+          iconSize: [24, 24], iconAnchor: [12, 12],
+        }),
+      }).bindPopup(`<div dir="rtl" style="font-family:'Heebo',sans-serif"><b>${s.num}. ${esc(s.name)}</b></div>`).addTo(layer);
+    });
+    if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 13 });
+  }, [stops]);
+
+  return <div ref={ref} style={{ height: "260px", borderRadius: "12px", position: "relative", zIndex: 0 }} className="overflow-hidden" />;
 }
 
 async function geocode(q) {
@@ -140,7 +179,7 @@ export default function DestinationMap({ destinations, onCoords, colorFor }) {
   return (
     <div>
       {/* zIndex:0 creates a stacking context so Leaflet panes stay under the app's modals */}
-      <div ref={containerRef} style={{ height: "320px", borderRadius: "14px", position: "relative", zIndex: 0 }} className="overflow-hidden" />
+      <div ref={containerRef} style={{ height: "640px", borderRadius: "14px", position: "relative", zIndex: 0 }} className="overflow-hidden" />
       {destinations.length === 0 && (
         <p style={{ color: "#9A9A9A" }} className="text-xs mt-2 text-center">הוסיפו יעדים כדי לראות אותם על המפה.</p>
       )}

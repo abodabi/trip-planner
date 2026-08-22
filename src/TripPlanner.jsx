@@ -1,7 +1,22 @@
 import { useState } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import { ChevronDown, ChevronUp, Plus, Pencil, Trash2, Download, X, Check } from "lucide-react";
-import DestinationMap, { parseCoords } from "./DestinationMap.jsx";
+import DestinationMap, { parseCoords, destCoords, DayRouteMap } from "./DestinationMap.jsx";
+
+// Short place info + image, best-effort from Wikipedia (Hebrew first, then English).
+const WIKI_CACHE = new Map();
+async function fetchPlaceInfo(name) {
+  for (const lang of ["he", "en"]) {
+    try {
+      const sr = await fetch(`https://${lang}.wikipedia.org/w/rest.php/v1/search/page?q=${encodeURIComponent(name)}&limit=1`);
+      const key = (await sr.json()).pages?.[0]?.key;
+      if (!key) continue;
+      const j = await (await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(key)}`)).json();
+      if (j.extract) return { title: j.title, extract: j.extract, img: j.thumbnail?.source || null, url: j.content_urls?.desktop?.page || null };
+    } catch { /* try next language */ }
+  }
+  return null;
+}
 
 const PALETTE = ["#FF6935", "#FEC418", "#10BAAE", "#CC427B", "#ED91FB", "#54C242"];
 const DEFAULT_CATEGORIES = [
@@ -27,6 +42,13 @@ const DEST_CATEGORY_TONES = {
 function destCategoryTone(cat) { return DEST_CATEGORY_TONES[cat] || DEST_CATEGORY_TONES["אחר"]; }
 function destCategoryColor(cat) { return destCategoryTone(cat).main; }
 const HE_DAYS = ["א", "ב", "ג", "ד", "ה", "ו", "ש"];
+const DAY_SLOTS = [
+  { key: "morning", label: "בוקר", icon: "🌅" },
+  { key: "noon", label: "צהריים", icon: "☀️" },
+  { key: "evening", label: "ערב", icon: "🌙" },
+];
+const SLOT_ORDER = { morning: 0, noon: 1, evening: 2 };
+const itemSlot = (it) => it.slot || "morning"; // items created before slots existed count as morning
 const REFUND_LABELS = { cancelable: "ניתן לביטול", non_refundable: "ללא החזר", na: "—" };
 
 export function defaultData(title = "טיול חדש", start = "2026-08-24", end = "2026-09-02") {
@@ -164,9 +186,12 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
   const [destSheet, setDestSheet] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
-  const [destRegionFilter, setDestRegionFilter] = useState("all");
-  const [destCatFilter, setDestCatFilter] = useState("all");
+  const [destRegionSel, setDestRegionSel] = useState([]); // empty = all
+  const [destCatSel, setDestCatSel] = useState([]); // empty = all
+  const [destSearch, setDestSearch] = useState("");
   const [sections, setSections] = useState({ budget: true, dest: false, map: true, cal: true });
+  const [destInfo, setDestInfo] = useState(null); // { d, loading, info }
+  const [addSlot, setAddSlot] = useState("morning");
   const toggleSection = (k) => setSections((s) => ({ ...s, [k]: !s[k] }));
   const setAllSections = (v) => setSections({ budget: v, dest: v, map: v, cal: v });
 
@@ -212,13 +237,20 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
   const regions = ["all", ...new Set(destinations.map((d) => d.region).filter(Boolean))];
   const destCats = ["all", ...DEST_CATEGORIES.filter((c) => destinations.some((d) => d.category === c))];
   const destDates = {};
-  Object.entries(calendar || {}).forEach(([date, e]) =>
-    (e.items || []).forEach((it) => { if (it.destId) (destDates[it.destId] = destDates[it.destId] || []).push(date); })
-  );
+  Object.entries(calendar || {}).forEach(([date, e]) => {
+    (e.items || []).forEach((it) => { if (it.destId) (destDates[it.destId] = destDates[it.destId] || []).push(date); });
+    if (e.sleepDestId) (destDates[e.sleepDestId] = destDates[e.sleepDestId] || []).push(date);
+  });
   Object.values(destDates).forEach((a) => a.sort());
   // scheduled first (by earliest calendar date), then unscheduled; ties by priority (high first)
+  const destQuery = destSearch.trim().toLowerCase();
+  const destFiltersActive = destCatSel.length > 0 || destRegionSel.length > 0 || destQuery.length > 0;
   const filteredDest = destinations
-    .filter((d) => (destRegionFilter === "all" || d.region === destRegionFilter) && (destCatFilter === "all" || d.category === destCatFilter))
+    .filter((d) =>
+      (destRegionSel.length === 0 || destRegionSel.includes(d.region)) &&
+      (destCatSel.length === 0 || destCatSel.includes(d.category)) &&
+      (!destQuery || [d.name, d.place, d.region, d.subtype, d.notes].filter(Boolean).some((s) => String(s).toLowerCase().includes(destQuery)))
+    )
     .sort((a, b) => {
       const da = destDates[a.id]?.[0] || "9999-99-99";
       const db = destDates[b.id]?.[0] || "9999-99-99";
@@ -268,21 +300,35 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     setExpenseSheet({ id: null, categoryId: match?.id || "", description: d.name, amount: d.price > 0 ? String(d.price) : "", currency: "EUR", date: todayISO(), status: "planned", refundable: "na", notes: d.region || "" });
   }
 
-  function addToCalendar(destId, date) { addToCalendarRange(destId, date, date); }
-  function addToCalendarRange(destId, from, to) {
+  function addToCalendar(destId, date, slot) { addToCalendarRange(destId, date, date, slot); }
+  function addToCalendarRange(destId, from, to, slot = "morning") {
     const dest = destinations.find((d) => d.id === destId);
     if (!dest) return;
     const [a, b] = from <= to ? [from, to] : [to, from];
     const dates = allDatesBetween(a, b);
-    // items of a multi-day range share a groupId so they can be removed together
-    const groupId = dates.length > 1 ? genId("grp") : null;
     const cal = { ...calendar };
-    dates.forEach((date) => {
-      const entry = cal[date] || { locationTag: "", items: [] };
-      cal[date] = { ...entry, items: [...entry.items, { id: genId("item"), text: dest.name, destId, ...(groupId ? { groupId, span: { start: a, end: b } } : {}) }] };
-    });
+    if (dest.category === "לינה") {
+      // lodging goes to the day's dedicated sleep slot, not the activity list
+      dates.forEach((date) => {
+        const entry = cal[date] || { locationTag: "", items: [] };
+        cal[date] = { ...entry, sleepDestId: destId };
+      });
+    } else {
+      // items of a multi-day range share a groupId so they can be removed together
+      const groupId = dates.length > 1 ? genId("grp") : null;
+      dates.forEach((date) => {
+        const entry = cal[date] || { locationTag: "", items: [] };
+        cal[date] = { ...entry, items: [...entry.items, { id: genId("item"), text: dest.name, destId, slot, ...(groupId ? { groupId, span: { start: a, end: b } } : {}) }] };
+      });
+    }
     persist({ ...data, calendar: cal });
     setSelectedDate(a);
+  }
+  function setSleep(date, destId) {
+    const cal = { ...calendar };
+    const entry = cal[date] || { locationTag: "", items: [] };
+    cal[date] = { ...entry, sleepDestId: destId || null };
+    persist({ ...data, calendar: cal });
   }
   function deleteDayItemGroup(groupId) {
     const cal = {};
@@ -296,11 +342,11 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     cal[date] = { ...entry, locationTag: tag };
     persist({ ...data, calendar: cal });
   }
-  function addFreeItem(date, text) {
+  function addFreeItem(date, text, slot = "morning") {
     if (!text.trim()) return;
     const cal = { ...calendar };
     const entry = cal[date] || { locationTag: "", items: [] };
-    cal[date] = { ...entry, items: [...entry.items, { id: genId("item"), text: text.trim() }] };
+    cal[date] = { ...entry, items: [...entry.items, { id: genId("item"), text: text.trim(), slot }] };
     persist({ ...data, calendar: cal });
   }
   function deleteDayItem(date, itemId) {
@@ -309,6 +355,15 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     if (!entry) return;
     cal[date] = { ...entry, items: entry.items.filter((i) => i.id !== itemId) };
     persist({ ...data, calendar: cal });
+  }
+
+  function openDestInfo(d) {
+    if (WIKI_CACHE.has(d.name)) { setDestInfo({ d, loading: false, info: WIKI_CACHE.get(d.name) }); return; }
+    setDestInfo({ d, loading: true, info: null });
+    fetchPlaceInfo(d.name).then((info) => {
+      WIKI_CACHE.set(d.name, info);
+      setDestInfo((cur) => (cur && cur.d.id === d.id ? { d, loading: false, info } : cur));
+    });
   }
 
   function saveSettings(s) {
@@ -404,6 +459,142 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
           <span style={{ color: "#C8C8C8" }} className="text-[11px]">·</span>
           <button onClick={() => setAllSections(false)} style={{ color: "#767676" }} className="text-[11px] px-1.5 py-1">כיווץ הכל</button>
         </div>
+
+        {/* CALENDAR */}
+        <Section title="יומן · מה עושים כל יום" open={sections.cal} onToggle={() => toggleSection("cal")}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "5px" }} className="mb-3">
+            {HE_DAYS.map((l) => <div key={l} style={{ color: "#9A9A9A" }} className="text-center text-[11px] font-bold">{l}</div>)}
+            {gridDates.map((iso) => {
+              const inTrip = iso >= meta.start && iso <= meta.end;
+              const entry = calendar[iso];
+              const dnum = new Date(iso + "T00:00:00").getDate();
+              const isSel = selectedDate === iso;
+              return (
+                <button
+                  key={iso}
+                  onClick={() => setSelectedDate(iso)}
+                  style={{ border: isSel ? "2px solid #FF6935" : "1px solid #E9ECF2", opacity: inTrip ? 1 : 0.35, minHeight: "56px" }}
+                  className="rounded-xl p-1.5 text-right text-[11px]"
+                >
+                  <div style={{ color: "#0F0F0F" }} className="font-extrabold text-sm">{dnum}</div>
+                  {(entry?.sleepDestId || entry?.locationTag) && <div style={{ background: "#FFE9E0", color: "#C2410C", fontSize: "9px" }} className="rounded px-1 mt-0.5 font-bold truncate">🛏 {destinations.find((x) => x.id === entry.sleepDestId)?.name || entry.locationTag}</div>}
+                  {entry?.items?.length > 0 && (
+                    <div className="flex gap-0.5 mt-0.5 flex-wrap items-center">
+                      {entry.items.slice(0, 4).map((it) => {
+                        const dd = destinations.find((x) => x.id === it.destId);
+                        return <span key={it.id} style={{ width: 6, height: 6, borderRadius: 999, background: dd ? destCategoryColor(dd.category) : "#C8C8C8", display: "inline-block" }} />;
+                      })}
+                      {entry.items.length > 4 && <span style={{ fontSize: "8px", color: "#9A9A9A" }}>+{entry.items.length - 4}</span>}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedDate && (() => {
+            const sorted = selEntry.items
+              .map((it, idx) => ({ it, idx }))
+              .sort((a, b) => (SLOT_ORDER[itemSlot(a.it)] - SLOT_ORDER[itemSlot(b.it)]) || (a.idx - b.idx));
+            const numOf = {};
+            sorted.forEach((x, i) => (numOf[x.it.id] = i + 1));
+            const sleepDest = selEntry.sleepDestId ? destinations.find((x) => x.id === selEntry.sleepDestId) : null;
+            const sleepOptions = destinations.filter((d) => d.category === "לינה");
+            const stops = sorted
+              .map(({ it }) => {
+                const dd = destinations.find((x) => x.id === it.destId);
+                const c = dd && destCoords(dd);
+                return c ? { num: numOf[it.id], name: it.text, coords: c } : null;
+              })
+              .filter(Boolean);
+            const sleepCoords = sleepDest && destCoords(sleepDest);
+            if (sleepCoords) stops.push({ num: "🛏", name: sleepDest.name, coords: sleepCoords });
+            return (
+            <div style={{ background: "#FFF3D0" }} className="rounded-2xl p-4">
+              <h3 style={{ color: "#0F0F0F" }} className="text-sm font-bold mb-2">{dateLabel(selectedDate)} · יום {HE_DAYS[new Date(selectedDate + "T00:00:00").getDay()]}</h3>
+
+              <div style={{ background: "#FFE9E0", border: "1px solid #FF6935" }} className="rounded-xl p-3 mb-3">
+                <p style={{ color: "#C2410C" }} className="text-[11px] font-bold mb-1.5">🛏 לינה</p>
+                {sleepDest ? (
+                  <div className="flex items-center justify-between text-xs">
+                    <button onClick={() => openDestInfo(sleepDest)} style={{ color: "#0F0F0F" }} className="font-semibold underline decoration-dotted">{sleepDest.name}</button>
+                    <button onClick={() => setSleep(selectedDate, null)}><X size={13} color="#9A9A9A" /></button>
+                  </div>
+                ) : (
+                  <>
+                    {sleepOptions.length > 0 && (
+                      <select value="" onChange={(e) => e.target.value && setSleep(selectedDate, e.target.value)} style={inputStyle} className={inputClass + " bg-white mb-2"}>
+                        <option value="">בחרו מקום לינה מהמאגר…</option>
+                        {sleepOptions.map((s) => <option key={s.id} value={s.id}>{s.name}{s.place ? ` (${s.place})` : ""}</option>)}
+                      </select>
+                    )}
+                    <input defaultValue={selEntry.locationTag} onBlur={(e) => setDayTag(selectedDate, e.target.value)} placeholder="או טקסט חופשי: עיר/אזור לינה" style={inputStyle} className={inputClass + " bg-white"} />
+                  </>
+                )}
+              </div>
+
+              {DAY_SLOTS.map((slot) => {
+                const slotItems = sorted.filter(({ it }) => itemSlot(it) === slot.key);
+                return (
+                  <div key={slot.key} className="mb-2">
+                    <p style={{ color: "#767676" }} className="text-[11px] font-bold mb-1">{slot.icon} {slot.label}</p>
+                    {slotItems.length === 0 ? (
+                      <p style={{ color: "#C8C8C8" }} className="text-[11px] mb-1 pr-1">—</p>
+                    ) : (
+                      <div className="flex flex-col gap-1.5 mb-1">
+                        {slotItems.map(({ it }) => {
+                          const dd = destinations.find((x) => x.id === it.destId);
+                          return (
+                            <div key={it.id} style={{ background: "#fff" }} className="rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+                              <span className="flex items-center gap-1.5 flex-wrap">
+                                <span style={{ width: 19, height: 19, borderRadius: 999, background: "#1E4B3A", color: "#fff", fontSize: "10px", fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{numOf[it.id]}</span>
+                                {dd ? <button onClick={() => openDestInfo(dd)} className="underline decoration-dotted text-right">{it.text}</button> : it.text}
+                                {it.span && <span style={{ background: "#F0F1F5", color: "#767676", borderRadius: "999px", padding: "0 6px", fontSize: "10px" }}>{dateLabel(it.span.start)}–{dateLabel(it.span.end)}</span>}
+                                {dd?.mapsLink && <a href={dd.mapsLink} target="_blank" rel="noreferrer" style={{ color: "#10BAAE" }} className="underline">מפות</a>}
+                              </span>
+                              <button onClick={() => it.groupId ? setConfirmDelete({ type: "dayItemGroup", id: it.groupId, label: `${it.text} (${dateLabel(it.span.start)}–${dateLabel(it.span.end)})` }) : deleteDayItem(selectedDate, it.id)}><X size={13} color="#9A9A9A" /></button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {stops.length > 0 && (
+                <div className="mb-3 mt-2">
+                  <DayRouteMap stops={stops} />
+                  <p style={{ color: "#9A9A9A" }} className="text-[10px] mt-1">מסלול היום לפי סדר בוקר ← ערב · הקו מקווקו הוא קו אווירי, לא ניווט</p>
+                </div>
+              )}
+
+              <Field label="הוספה אל">
+                <div className="flex gap-2">
+                  {DAY_SLOTS.map((s) => (
+                    <button key={s.key} onClick={() => setAddSlot(s.key)} style={{ background: addSlot === s.key ? "#1E4B3A" : "#fff", color: addSlot === s.key ? "#fff" : "#343434" }} className="flex-1 rounded-xl py-2 text-xs font-medium">
+                      {s.icon} {s.label}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              {destinations.length > 0 && (
+                <Field label="הוספת יעד מהמאגר">
+                  <select value="" onChange={(e) => { if (e.target.value) { addToCalendar(e.target.value, selectedDate, addSlot); e.target.value = ""; } }} style={inputStyle} className={inputClass + " bg-white"}>
+                    <option value="">בחרו יעד…</option>
+                    {Object.entries(destByRegion).map(([r, list]) => (
+                      <optgroup key={r} label={r}>
+                        {list.map((s) => <option key={s.id} value={s.id}>{s.name}{s.category ? ` (${s.category})` : ""}</option>)}
+                      </optgroup>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              <FreeItemInput onAdd={(text) => addFreeItem(selectedDate, text, addSlot)} />
+            </div>
+            );
+          })()}
+        </Section>
 
         {/* BUDGET */}
         <Section title="תקציב" open={sections.budget} onToggle={() => toggleSection("budget")}>
@@ -518,27 +709,31 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
 
         {/* DESTINATIONS */}
         <Section title="מאגר יעדים" count={filteredDest.length} open={sections.dest} onToggle={() => toggleSection("dest")}>
-          <p style={{ color: "#9A9A9A" }} className="text-[10px] mb-2">ממוין לפי התאריך ביומן, ואז לפי עדיפות</p>
+          <p style={{ color: "#9A9A9A" }} className="text-[10px] mb-2">ממוין לפי התאריך ביומן, ואז לפי עדיפות · אפשר לבחור כמה קטגוריות ואזורים</p>
+          <input value={destSearch} onChange={(e) => setDestSearch(e.target.value)} placeholder="🔍 חיפוש יעד, מקום או הערה…" style={inputStyle} className={inputClass + " mb-2"} />
           <div className="flex flex-wrap gap-1.5 mb-2">
             {destCats.map((c) => {
-              const sel = destCatFilter === c;
+              const sel = c === "all" ? destCatSel.length === 0 : destCatSel.includes(c);
               const t = destCategoryTone(c);
               const st = c === "all"
                 ? { background: sel ? "#0F0F0F" : "#F2F4F8", color: sel ? "#fff" : "#343434" }
                 : { background: sel ? t.bg : "#F2F4F8", color: sel ? t.text : "#343434", border: sel ? `1.5px solid ${t.main}` : "1.5px solid transparent" };
               return (
-                <button key={c} onClick={() => setDestCatFilter(c)} style={{ ...st, fontWeight: sel ? 700 : 500 }} className="px-3 py-1 rounded-full text-xs">
+                <button key={c} onClick={() => c === "all" ? setDestCatSel([]) : setDestCatSel(sel ? destCatSel.filter((x) => x !== c) : [...destCatSel, c])} style={{ ...st, fontWeight: sel ? 700 : 500 }} className="px-3 py-1 rounded-full text-xs">
                   {c === "all" ? "כל הקטגוריות" : c}
                 </button>
               );
             })}
           </div>
           <div className="flex flex-wrap gap-1.5 mb-3">
-            {regions.map((r) => (
-              <button key={r} onClick={() => setDestRegionFilter(r)} style={{ background: destRegionFilter === r ? "#FF6935" : "#F2F4F8", color: destRegionFilter === r ? "#fff" : "#343434" }} className="px-3 py-1 rounded-full text-xs font-semibold">
-                {r === "all" ? "כל האזורים" : r}
-              </button>
-            ))}
+            {regions.map((r) => {
+              const sel = r === "all" ? destRegionSel.length === 0 : destRegionSel.includes(r);
+              return (
+                <button key={r} onClick={() => r === "all" ? setDestRegionSel([]) : setDestRegionSel(sel ? destRegionSel.filter((x) => x !== r) : [...destRegionSel, r])} style={{ background: sel ? "#FF6935" : "#F2F4F8", color: sel ? "#fff" : "#343434" }} className="px-3 py-1 rounded-full text-xs font-semibold">
+                  {r === "all" ? "כל האזורים" : r}
+                </button>
+              );
+            })}
           </div>
           {destinations.length === 0 ? (
             <p style={{ color: "#9A9A9A" }} className="text-xs py-3 text-center">עוד אין יעדים. שלחו לי צילומי מסך או קובץ מהמפה כדי שאייבא, או הוסיפו יעד ראשון.</p>
@@ -547,7 +742,9 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
               {filteredDest.map((d) => (
                 <div key={d.id} style={{ border: "1px solid #E9ECF2" }} className="rounded-xl p-3 flex items-center justify-between gap-2">
                   <div className="flex-1">
-                    <p style={{ color: "#0F0F0F" }} className="text-sm font-bold">{d.name}</p>
+                    <button onClick={() => openDestInfo(d)} className="text-right">
+                      <p style={{ color: "#0F0F0F" }} className="text-sm font-bold">{d.name} <span style={{ color: "#10BAAE", fontSize: "11px", fontWeight: 500 }}>ℹ️</span></p>
+                    </button>
                     <div className="flex items-center flex-wrap gap-1.5 mb-1">
                       {d.category && (
                         <span style={{ background: destCategoryTone(d.category).bg, color: destCategoryTone(d.category).text, border: `1px solid ${destCategoryTone(d.category).main}`, borderRadius: "999px", padding: "1px 8px", fontSize: "10px", fontWeight: 700 }}>{d.category}</span>
@@ -613,83 +810,8 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
         {/* MAP */}
         <Section title="מפת היעדים" open={sections.map} onToggle={() => toggleSection("map")}>
           <DestinationMap destinations={filteredDest} onCoords={setDestCoords} colorFor={destCategoryColor} />
-          {(destCatFilter !== "all" || destRegionFilter !== "all") && (
+          {destFiltersActive && (
             <p style={{ color: "#9A9A9A" }} className="text-[11px] mt-1.5">המפה מציגה רק את היעדים המסוננים ({filteredDest.length}).</p>
-          )}
-        </Section>
-
-        {/* CALENDAR */}
-        <Section title="יומן · מה עושים כל יום" open={sections.cal} onToggle={() => toggleSection("cal")}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "5px" }} className="mb-3">
-            {HE_DAYS.map((l) => <div key={l} style={{ color: "#9A9A9A" }} className="text-center text-[11px] font-bold">{l}</div>)}
-            {gridDates.map((iso) => {
-              const inTrip = iso >= meta.start && iso <= meta.end;
-              const entry = calendar[iso];
-              const dnum = new Date(iso + "T00:00:00").getDate();
-              const isSel = selectedDate === iso;
-              return (
-                <button
-                  key={iso}
-                  onClick={() => setSelectedDate(iso)}
-                  style={{ border: isSel ? "2px solid #FF6935" : "1px solid #E9ECF2", opacity: inTrip ? 1 : 0.35, minHeight: "56px" }}
-                  className="rounded-xl p-1.5 text-right text-[11px]"
-                >
-                  <div style={{ color: "#0F0F0F" }} className="font-extrabold text-sm">{dnum}</div>
-                  {entry?.locationTag && <div style={{ background: "#FFF3D0", color: "#94740A", fontSize: "9px" }} className="rounded px-1 mt-0.5 font-bold truncate">{entry.locationTag}</div>}
-                  {entry?.items?.length > 0 && (
-                    <div className="flex gap-0.5 mt-0.5 flex-wrap items-center">
-                      {entry.items.slice(0, 4).map((it) => {
-                        const dd = destinations.find((x) => x.id === it.destId);
-                        return <span key={it.id} style={{ width: 6, height: 6, borderRadius: 999, background: dd ? destCategoryColor(dd.category) : "#C8C8C8", display: "inline-block" }} />;
-                      })}
-                      {entry.items.length > 4 && <span style={{ fontSize: "8px", color: "#9A9A9A" }}>+{entry.items.length - 4}</span>}
-                    </div>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {selectedDate && (
-            <div style={{ background: "#FFF3D0" }} className="rounded-2xl p-4">
-              <h3 style={{ color: "#0F0F0F" }} className="text-sm font-bold mb-2">{dateLabel(selectedDate)} · יום {HE_DAYS[new Date(selectedDate + "T00:00:00").getDay()]}</h3>
-              <Field label="מיקום/עיר ללינה באותו יום">
-                <input defaultValue={selEntry.locationTag} onBlur={(e) => setDayTag(selectedDate, e.target.value)} placeholder="לדוגמה: פופ קוק" style={inputStyle} className={inputClass + " bg-white"} />
-              </Field>
-              {selEntry.items.length === 0 ? (
-                <p style={{ color: "#9A9A9A" }} className="text-xs mb-2">אין עדיין פעילויות ליום הזה.</p>
-              ) : (
-                <div className="flex flex-col gap-1.5 mb-2">
-                  {selEntry.items.map((it) => {
-                    const dd = destinations.find((x) => x.id === it.destId);
-                    return (
-                      <div key={it.id} style={{ background: "#fff" }} className="rounded-lg px-3 py-2 flex items-center justify-between text-xs">
-                        <span className="flex items-center gap-1.5 flex-wrap">
-                          <span style={{ width: 7, height: 7, borderRadius: 999, background: dd ? destCategoryColor(dd.category) : "#C8C8C8", display: "inline-block", flexShrink: 0 }} />
-                          {it.text}
-                          {it.span && <span style={{ background: "#F0F1F5", color: "#767676", borderRadius: "999px", padding: "0 6px", fontSize: "10px" }}>{dateLabel(it.span.start)}–{dateLabel(it.span.end)}</span>}
-                          {dd?.mapsLink && <a href={dd.mapsLink} target="_blank" rel="noreferrer" style={{ color: "#10BAAE" }} className="underline">מפות</a>}
-                        </span>
-                        <button onClick={() => it.groupId ? setConfirmDelete({ type: "dayItemGroup", id: it.groupId, label: `${it.text} (${dateLabel(it.span.start)}–${dateLabel(it.span.end)})` }) : deleteDayItem(selectedDate, it.id)}><X size={13} color="#9A9A9A" /></button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {destinations.length > 0 && (
-                <Field label="הוספת יעד מהמאגר">
-                  <select value="" onChange={(e) => { if (e.target.value) { addToCalendar(e.target.value, selectedDate); e.target.value = ""; } }} style={inputStyle} className={inputClass + " bg-white"}>
-                    <option value="">בחרו יעד…</option>
-                    {Object.entries(destByRegion).map(([r, list]) => (
-                      <optgroup key={r} label={r}>
-                        {list.map((s) => <option key={s.id} value={s.id}>{s.name}{s.category ? ` (${s.category})` : ""}</option>)}
-                      </optgroup>
-                    ))}
-                  </select>
-                </Field>
-              )}
-              <FreeItemInput onAdd={(text) => addFreeItem(selectedDate, text)} />
-            </div>
           )}
         </Section>
 
@@ -718,7 +840,32 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
 
       <Modal open={!!destSheet && destSheet.mode === "assign"} title="הוספה ליומן" onClose={() => setDestSheet(null)}>
         {destSheet?.mode === "assign" && (
-          <AssignForm dates={tripDates} onSave={(from, to) => { addToCalendarRange(destSheet.destId, from, to); setDestSheet(null); }} />
+          <AssignForm
+            dates={tripDates}
+            isSleep={destinations.find((d) => d.id === destSheet.destId)?.category === "לינה"}
+            onSave={(from, to, slot) => { addToCalendarRange(destSheet.destId, from, to, slot); setDestSheet(null); }}
+          />
+        )}
+      </Modal>
+
+      <Modal open={!!destInfo} title={destInfo?.d?.name || ""} onClose={() => setDestInfo(null)}>
+        {destInfo?.loading ? (
+          <p style={{ color: "#767676" }} className="text-sm py-6 text-center">מחפש מידע ותמונה…</p>
+        ) : destInfo?.info ? (
+          <div>
+            {destInfo.info.img && <img src={destInfo.info.img} alt={destInfo.d.name} style={{ width: "100%", maxHeight: "220px", objectFit: "cover", borderRadius: "14px" }} className="mb-3" />}
+            <p style={{ color: "#343434" }} className="text-sm mb-3" dir="auto">{destInfo.info.extract}</p>
+            <p style={{ color: "#9A9A9A" }} className="text-[10px] mb-3">מקור: ויקיפדיה ("{destInfo.info.title}") — התאמה לפי שם, ייתכן דיוק חלקי.</p>
+            <div className="flex gap-2">
+              {destInfo.info.url && <a href={destInfo.info.url} target="_blank" rel="noreferrer" style={{ background: "#F2F4F8", color: "#0E8F86" }} className="flex-1 rounded-xl py-2 text-xs font-semibold text-center">להמשך קריאה</a>}
+              {destInfo.d.mapsLink && <a href={destInfo.d.mapsLink} target="_blank" rel="noreferrer" style={{ background: "#F2F4F8", color: "#0E8F86" }} className="flex-1 rounded-xl py-2 text-xs font-semibold text-center">פתיחה במפות</a>}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <p style={{ color: "#767676" }} className="text-sm mb-3">לא נמצא מידע על המקום הזה בוויקיפדיה.</p>
+            {destInfo?.d?.mapsLink && <a href={destInfo.d.mapsLink} target="_blank" rel="noreferrer" style={{ background: "#F2F4F8", color: "#0E8F86" }} className="block rounded-xl py-2 text-xs font-semibold text-center">פתיחה במפות גוגל</a>}
+          </div>
         )}
       </Modal>
 
@@ -924,9 +1071,10 @@ function TripSettingsForm({ meta, members: initialMembers, userEmail, tripId, on
   );
 }
 
-function AssignForm({ dates, onSave }) {
+function AssignForm({ dates, isSleep, onSave }) {
   const [from, setFrom] = useState(dates[0]);
   const [to, setTo] = useState(dates[0]);
+  const [slot, setSlot] = useState("morning");
   const opts = dates.map((d) => <option key={d} value={d}>{dateLabel(d)} · יום {HE_DAYS[new Date(d + "T00:00:00").getDay()]}</option>);
   const nDays = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
   return (
@@ -937,8 +1085,21 @@ function AssignForm({ dates, onSave }) {
       <Field label="עד תאריך (לפריט של יום אחד — השאירו זהה)">
         <select value={to} onChange={(e) => setTo(e.target.value)} style={inputStyle} className={inputClass + " bg-white"}>{opts}</select>
       </Field>
+      {isSleep ? (
+        <p style={{ background: "#FFE9E0", color: "#C2410C", borderRadius: "10px", padding: "8px 10px" }} className="text-xs mb-2">🛏 מקום לינה — ייקבע כלינה של כל יום בטווח.</p>
+      ) : (
+        <Field label="חלק של היום">
+          <div className="flex gap-2">
+            {DAY_SLOTS.map((s) => (
+              <button key={s.key} onClick={() => setSlot(s.key)} style={{ background: slot === s.key ? "#1E4B3A" : "#F2F4F8", color: slot === s.key ? "#fff" : "#343434" }} className="flex-1 rounded-xl py-2 text-sm font-medium">
+                {s.icon} {s.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+      )}
       {nDays > 1 && <p style={{ color: "#767676" }} className="text-xs mb-2">יופיע ביומן ב-{nDays} ימים ({dateLabel(from)}–{dateLabel(to)}).</p>}
-      <button onClick={() => onSave(from, to)} style={{ background: "#FF6935", color: "#fff" }} className="w-full rounded-xl py-3 mt-1 font-semibold text-sm">הוספה</button>
+      <button onClick={() => onSave(from, to, slot)} style={{ background: "#FF6935", color: "#fff" }} className="w-full rounded-xl py-3 mt-1 font-semibold text-sm">הוספה</button>
     </div>
   );
 }
