@@ -405,7 +405,7 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
   destinations.forEach((d) => { const r = d.region || "ללא אזור"; (destByRegion[r] = destByRegion[r] || []).push(d); });
 
   return (
-    <div dir="rtl" style={{ background: "#F2F4F8", minHeight: "100vh", fontFamily: "'Heebo', sans-serif" }}>
+    <div dir="rtl" style={{ background: "#F2F4F8", minHeight: "100vh", fontFamily: "'Heebo', sans-serif", overflowX: "hidden" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Rubik:wght@500;600;700&family=Heebo:wght@400;500;600;700&display=swap');`}</style>
 
       <div style={{ background: "#1E4B3A" }} className="pt-4 pb-4 px-5">
@@ -462,7 +462,8 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
 
         {/* CALENDAR */}
         <Section title="יומן · מה עושים כל יום" open={sections.cal} onToggle={() => toggleSection("cal")}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: "5px" }} className="mb-3">
+          {/* minmax(0,1fr): otherwise cell content (nowrap sleep chip) sets a min-content width and the grid overflows the viewport */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: "4px" }} className="mb-3">
             {HE_DAYS.map((l) => <div key={l} style={{ color: "#9A9A9A" }} className="text-center text-[11px] font-bold">{l}</div>)}
             {gridDates.map((iso) => {
               const inTrip = iso >= meta.start && iso <= meta.end;
@@ -473,8 +474,8 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
                 <button
                   key={iso}
                   onClick={() => setSelectedDate(iso)}
-                  style={{ border: isSel ? "2px solid #FF6935" : "1px solid #E9ECF2", opacity: inTrip ? 1 : 0.35, minHeight: "56px" }}
-                  className="rounded-xl p-1.5 text-right text-[11px]"
+                  style={{ border: isSel ? "2px solid #FF6935" : "1px solid #E9ECF2", opacity: inTrip ? 1 : 0.35, minHeight: "56px", minWidth: 0 }}
+                  className="rounded-xl p-1 text-right text-[11px] overflow-hidden"
                 >
                   <div style={{ color: "#0F0F0F" }} className="font-extrabold text-sm">{dnum}</div>
                   {(entry?.sleepDestId || entry?.locationTag) && <div style={{ background: "#FFE9E0", color: "#C2410C", fontSize: "9px" }} className="rounded px-1 mt-0.5 font-bold truncate">🛏 {destinations.find((x) => x.id === entry.sleepDestId)?.name || entry.locationTag}</div>}
