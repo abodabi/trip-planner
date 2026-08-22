@@ -29,9 +29,9 @@ function destCategoryColor(cat) { return destCategoryTone(cat).main; }
 const HE_DAYS = ["א", "ב", "ג", "ד", "ה", "ו", "ש"];
 const REFUND_LABELS = { cancelable: "ניתן לביטול", non_refundable: "ללא החזר", na: "—" };
 
-export function defaultData() {
+export function defaultData(title = "טיול חדש", start = "2026-08-24", end = "2026-09-02") {
   return {
-    meta: { title: "תקציב הטיול לטטרה", start: "2026-08-24", end: "2026-09-02" },
+    meta: { title, start, end },
     exchangeRate: 4.0,
     categories: DEFAULT_CATEGORIES,
     expenses: [],
@@ -54,6 +54,19 @@ function todayISO() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function dateLabel(iso) { const d = new Date(iso + "T00:00:00"); return `${d.getDate()}.${d.getMonth() + 1}`; }
+// "24.8, 26.8, 27.8, 28.8" -> "24.8, 26.8–28.8"
+function formatDateRuns(dates) {
+  const uniq = [...new Set(dates)].sort();
+  const runs = [];
+  let s = null, p = null;
+  uniq.forEach((d) => {
+    if (s && addDays(p, 1) === d) { p = d; return; }
+    if (s) runs.push([s, p]);
+    s = p = d;
+  });
+  if (s) runs.push([s, p]);
+  return runs.map(([a, b]) => (a === b ? dateLabel(a) : `${dateLabel(a)}–${dateLabel(b)}`)).join(", ");
+}
 function allDatesBetween(start, end) {
   const out = []; let d = start; let guard = 0;
   while (d <= end && guard < 400) { out.push(d); d = addDays(d, 1); guard++; }
@@ -126,7 +139,8 @@ function Field({ label, children }) {
 const inputStyle = { borderColor: "#E0E3EA", color: "#0F0F0F" };
 const inputClass = "w-full border rounded-xl p-3 text-sm";
 
-export default function TripPlanner({ data, persist, error, onSignOut, userEmail }) {
+export default function TripPlanner({ data, persist, error, onSignOut, userEmail, tripId, onBack }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [expandedCat, setExpandedCat] = useState({});
   const [displayCurrency, setDisplayCurrency] = useState("EUR");
   const [editingRate, setEditingRate] = useState(false);
@@ -226,13 +240,27 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     setExpenseSheet({ id: null, categoryId: match?.id || "", description: d.name, amount: d.price > 0 ? String(d.price) : "", currency: "EUR", date: todayISO(), status: "planned", refundable: "na", notes: d.region || "" });
   }
 
-  function addToCalendar(destId, date) {
+  function addToCalendar(destId, date) { addToCalendarRange(destId, date, date); }
+  function addToCalendarRange(destId, from, to) {
     const dest = destinations.find((d) => d.id === destId);
+    if (!dest) return;
+    const [a, b] = from <= to ? [from, to] : [to, from];
+    const dates = allDatesBetween(a, b);
+    // items of a multi-day range share a groupId so they can be removed together
+    const groupId = dates.length > 1 ? genId("grp") : null;
     const cal = { ...calendar };
-    const entry = cal[date] || { locationTag: "", items: [] };
-    cal[date] = { ...entry, items: [...entry.items, { id: genId("item"), text: dest.name, destId }] };
+    dates.forEach((date) => {
+      const entry = cal[date] || { locationTag: "", items: [] };
+      cal[date] = { ...entry, items: [...entry.items, { id: genId("item"), text: dest.name, destId, ...(groupId ? { groupId, span: { start: a, end: b } } : {}) }] };
+    });
     persist({ ...data, calendar: cal });
-    setSelectedDate(date);
+    setSelectedDate(a);
+  }
+  function deleteDayItemGroup(groupId) {
+    const cal = {};
+    Object.entries(calendar).forEach(([date, e]) => { cal[date] = { ...e, items: (e.items || []).filter((i) => i.groupId !== groupId) }; });
+    persist({ ...data, calendar: cal });
+    setConfirmDelete(null);
   }
   function setDayTag(date, tag) {
     const cal = { ...calendar };
@@ -253,6 +281,17 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     if (!entry) return;
     cal[date] = { ...entry, items: entry.items.filter((i) => i.id !== itemId) };
     persist({ ...data, calendar: cal });
+  }
+
+  function saveSettings(s) {
+    persist({ ...data, meta: { ...meta, title: s.title, start: s.start, end: s.end }, memberEmails: s.members });
+    setSettingsOpen(false);
+  }
+  function leaveTrip() {
+    persist({ ...data, memberEmails: (data.memberEmails || []).filter((e) => e !== userEmail) });
+    setConfirmDelete(null);
+    setSettingsOpen(false);
+    onBack();
   }
 
   function saveRate() {
@@ -291,7 +330,11 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     <div dir="rtl" style={{ background: "#F2F4F8", minHeight: "100vh", fontFamily: "'Heebo', sans-serif" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Rubik:wght@500;600;700&family=Heebo:wght@400;500;600;700&display=swap');`}</style>
 
-      <div style={{ background: "#1E4B3A" }} className="pt-6 pb-4 px-5">
+      <div style={{ background: "#1E4B3A" }} className="pt-4 pb-4 px-5">
+        <div className="flex items-center justify-between mb-2">
+          <button onClick={onBack} style={{ color: "#D6E8DE" }} className="text-xs font-semibold">‹ הטיולים שלי</button>
+          <button onClick={() => setSettingsOpen(true)} style={{ color: "#D6E8DE" }} className="text-xs font-semibold">הגדרות ⚙</button>
+        </div>
         <h1 style={{ fontFamily: "'Rubik', sans-serif", color: "#FFFFFF" }} className="text-2xl font-bold mb-1">{meta.title}</h1>
         <p style={{ color: "#D6E8DE", unicodeBidi: "isolate", direction: "ltr", display: "inline-block" }} className="text-sm mb-4">{start.getDate()}.{start.getMonth() + 1} – {end.getDate()}.{end.getMonth() + 1}.{end.getFullYear()}</p>
 
@@ -497,7 +540,7 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
                       <p style={{ background: "#FFF3D0", color: "#94740A", borderRadius: "8px", padding: "2px 8px", display: "inline-block" }} className="text-[11px] font-semibold mb-1">📝 {d.notes}</p>
                     )}
                     {destDates[d.id]?.length > 0 && (
-                      <p style={{ background: "#E3F6F4", color: "#0B7A72", borderRadius: "8px", padding: "2px 8px", display: "inline-block" }} className="text-[11px] font-semibold mb-1 mr-1">📅 ביומן: {destDates[d.id].map(dateLabel).join(", ")}</p>
+                      <p style={{ background: "#E3F6F4", color: "#0B7A72", borderRadius: "8px", padding: "2px 8px", display: "inline-block" }} className="text-[11px] font-semibold mb-1 mr-1">📅 ביומן: {formatDateRuns(destDates[d.id])}</p>
                     )}
                     <div className="flex gap-3">
                       {d.mapsLink && <a href={d.mapsLink} target="_blank" rel="noreferrer" style={{ color: "#10BAAE" }} className="text-xs underline">מפות</a>}
@@ -595,12 +638,13 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
                     const dd = destinations.find((x) => x.id === it.destId);
                     return (
                       <div key={it.id} style={{ background: "#fff" }} className="rounded-lg px-3 py-2 flex items-center justify-between text-xs">
-                        <span className="flex items-center gap-1.5">
+                        <span className="flex items-center gap-1.5 flex-wrap">
                           <span style={{ width: 7, height: 7, borderRadius: 999, background: dd ? destCategoryColor(dd.category) : "#C8C8C8", display: "inline-block", flexShrink: 0 }} />
                           {it.text}
+                          {it.span && <span style={{ background: "#F0F1F5", color: "#767676", borderRadius: "999px", padding: "0 6px", fontSize: "10px" }}>{dateLabel(it.span.start)}–{dateLabel(it.span.end)}</span>}
                           {dd?.mapsLink && <a href={dd.mapsLink} target="_blank" rel="noreferrer" style={{ color: "#10BAAE" }} className="underline">מפות</a>}
                         </span>
-                        <button onClick={() => deleteDayItem(selectedDate, it.id)}><X size={13} color="#9A9A9A" /></button>
+                        <button onClick={() => it.groupId ? setConfirmDelete({ type: "dayItemGroup", id: it.groupId, label: `${it.text} (${dateLabel(it.span.start)}–${dateLabel(it.span.end)})` }) : deleteDayItem(selectedDate, it.id)}><X size={13} color="#9A9A9A" /></button>
                       </div>
                     );
                   })}
@@ -648,17 +692,32 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
 
       <Modal open={!!destSheet && destSheet.mode === "assign"} title="הוספה ליומן" onClose={() => setDestSheet(null)}>
         {destSheet?.mode === "assign" && (
-          <AssignForm dates={tripDates} onSave={(date) => { addToCalendar(destSheet.destId, date); setDestSheet(null); }} />
+          <AssignForm dates={tripDates} onSave={(from, to) => { addToCalendarRange(destSheet.destId, from, to); setDestSheet(null); }} />
+        )}
+      </Modal>
+
+      <Modal open={settingsOpen} title="הגדרות הטיול" onClose={() => setSettingsOpen(false)}>
+        {settingsOpen && (
+          <TripSettingsForm
+            meta={meta}
+            members={data.memberEmails || []}
+            userEmail={userEmail}
+            tripId={tripId}
+            onSave={saveSettings}
+            onLeave={() => setConfirmDelete({ type: "leaveTrip", label: meta.title })}
+          />
         )}
       </Modal>
 
       <ConfirmDialog
         open={!!confirmDelete}
-        title={confirmDelete?.type === "expense" ? "מחיקת הוצאה" : confirmDelete?.type === "category" ? "מחיקת קטגוריה" : "מחיקת יעד"}
-        body={`למחוק את "${confirmDelete?.label}"? לא ניתן לשחזר.`}
+        title={confirmDelete?.type === "expense" ? "מחיקת הוצאה" : confirmDelete?.type === "category" ? "מחיקת קטגוריה" : confirmDelete?.type === "dayItemGroup" ? "הסרה מהיומן" : confirmDelete?.type === "leaveTrip" ? "יציאה מהטיול" : "מחיקת יעד"}
+        body={confirmDelete?.type === "dayItemGroup" ? `להסיר את "${confirmDelete?.label}" מכל ימי הטווח?` : confirmDelete?.type === "leaveTrip" ? `לצאת מ"${confirmDelete?.label}"? תוכלו לחזור רק אם משתתף אחר יוסיף אתכם שוב.` : `למחוק את "${confirmDelete?.label}"? לא ניתן לשחזר.`}
         onConfirm={() => {
           if (confirmDelete.type === "expense") deleteExpense(confirmDelete.id);
           else if (confirmDelete.type === "category") deleteCategory(confirmDelete.id);
+          else if (confirmDelete.type === "dayItemGroup") deleteDayItemGroup(confirmDelete.id);
+          else if (confirmDelete.type === "leaveTrip") leaveTrip();
           else deleteDestination(confirmDelete.id);
         }}
         onCancel={() => setConfirmDelete(null)}
@@ -785,16 +844,75 @@ function DestinationForm({ initial, onSave }) {
   );
 }
 
-function AssignForm({ dates, onSave }) {
-  const [date, setDate] = useState(dates[0]);
+function TripSettingsForm({ meta, members: initialMembers, userEmail, tripId, onSave, onLeave }) {
+  const [title, setTitle] = useState(meta.title || "");
+  const [start, setStart] = useState(meta.start);
+  const [end, setEnd] = useState(meta.end);
+  const [members, setMembers] = useState(initialMembers);
+  const [newEmail, setNewEmail] = useState("");
+  const [copied, setCopied] = useState(false);
+  const shareUrl = `${window.location.origin}${window.location.pathname}#/trip/${tripId}`;
+
+  function addMember() {
+    const e = newEmail.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(e) || members.includes(e)) return;
+    setMembers([...members, e]);
+    setNewEmail("");
+  }
+  function copyLink() {
+    navigator.clipboard.writeText(shareUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+  }
+  const valid = title.trim() && start && end && end >= start && members.includes(userEmail);
+
   return (
     <div>
-      <Field label="בחרו יום">
-        <select value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} className={inputClass + " bg-white"}>
-          {dates.map((d) => <option key={d} value={d}>{dateLabel(d)} · יום {HE_DAYS[new Date(d + "T00:00:00").getDay()]}</option>)}
-        </select>
+      <Field label="שם הטיול"><input value={title} onChange={(e) => setTitle(e.target.value)} style={inputStyle} className={inputClass} /></Field>
+      <div className="flex gap-3">
+        <div className="flex-1"><Field label="מתאריך"><input type="date" value={start} onChange={(e) => setStart(e.target.value)} style={inputStyle} className={inputClass} /></Field></div>
+        <div className="flex-1"><Field label="עד תאריך"><input type="date" value={end} onChange={(e) => setEnd(e.target.value)} style={inputStyle} className={inputClass} /></Field></div>
+      </div>
+      <Field label="משתתפים">
+        <div className="flex flex-col gap-1.5 mb-2">
+          {members.map((m) => (
+            <div key={m} style={{ background: "#F2F4F8" }} className="rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+              <span style={{ color: "#343434", direction: "ltr" }}>{m}{m === userEmail && <span style={{ color: "#9A9A9A" }}> (את/ה)</span>}</span>
+              {m !== userEmail && <button onClick={() => setMembers(members.filter((x) => x !== m))}><X size={13} color="#9A9A9A" /></button>}
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input value={newEmail} onChange={(e) => setNewEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addMember()} placeholder="email@gmail.com" dir="ltr" style={inputStyle} className={inputClass} />
+          <button onClick={addMember} style={{ background: "#1E4B3A", color: "#fff" }} className="rounded-xl px-4 text-sm font-semibold">הוספה</button>
+        </div>
+        <p style={{ color: "#9A9A9A" }} className="text-[11px] mt-1">מי שמוסיפים יראו את הטיול אחרי התחברות עם חשבון הגוגל הזה. השינוי נשמר בלחיצה על שמירה.</p>
       </Field>
-      <button onClick={() => onSave(date)} style={{ background: "#FF6935", color: "#fff" }} className="w-full rounded-xl py-3 mt-1 font-semibold text-sm">הוספה</button>
+      <Field label="קישור לטיול (למשתתפים בלבד)">
+        <div className="flex gap-2">
+          <input readOnly value={shareUrl} dir="ltr" style={{ ...inputStyle, color: "#767676" }} className={inputClass} onFocus={(e) => e.target.select()} />
+          <button onClick={copyLink} style={{ background: copied ? "#54C242" : "#1E4B3A", color: "#fff" }} className="rounded-xl px-4 text-sm font-semibold whitespace-nowrap">{copied ? "הועתק ✓" : "העתקה"}</button>
+        </div>
+      </Field>
+      <button disabled={!valid} onClick={() => onSave({ title: title.trim(), start, end, members })} style={{ background: valid ? "#FF6935" : "#C8C8C8", color: "#fff" }} className="w-full rounded-xl py-3 mt-1 font-semibold text-sm">שמירה</button>
+      <button onClick={onLeave} style={{ color: "#EA1F33" }} className="w-full py-3 mt-1 text-xs font-semibold">יציאה מהטיול</button>
+    </div>
+  );
+}
+
+function AssignForm({ dates, onSave }) {
+  const [from, setFrom] = useState(dates[0]);
+  const [to, setTo] = useState(dates[0]);
+  const opts = dates.map((d) => <option key={d} value={d}>{dateLabel(d)} · יום {HE_DAYS[new Date(d + "T00:00:00").getDay()]}</option>);
+  const nDays = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
+  return (
+    <div>
+      <Field label="מתאריך">
+        <select value={from} onChange={(e) => { setFrom(e.target.value); if (e.target.value > to) setTo(e.target.value); }} style={inputStyle} className={inputClass + " bg-white"}>{opts}</select>
+      </Field>
+      <Field label="עד תאריך (לפריט של יום אחד — השאירו זהה)">
+        <select value={to} onChange={(e) => setTo(e.target.value)} style={inputStyle} className={inputClass + " bg-white"}>{opts}</select>
+      </Field>
+      {nDays > 1 && <p style={{ color: "#767676" }} className="text-xs mb-2">יופיע ביומן ב-{nDays} ימים ({dateLabel(from)}–{dateLabel(to)}).</p>}
+      <button onClick={() => onSave(from, to)} style={{ background: "#FF6935", color: "#fff" }} className="w-full rounded-xl py-3 mt-1 font-semibold text-sm">הוספה</button>
     </div>
   );
 }

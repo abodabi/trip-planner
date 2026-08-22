@@ -1,22 +1,14 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Access is granted by document existence in the `allowlist` collection,
-    // keyed by the Google account email. Manage members in the Firebase console.
-    function isAllowed() {
-      return request.auth != null &&
-        exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email));
-    }
-
+    // Each trip is private to its members: the memberEmails array on the doc
+    // is both the access list (checked here) and the query key the app uses
+    // to list a user's trips (array-contains).
     match /trips/{tripId} {
-      allow read, write: if isAllowed();
-    }
-
-    // A signed-in user may check only their own allowlist entry (used by the
-    // app's access gate). Entries are managed manually — never from the client.
-    match /allowlist/{email} {
-      allow get: if request.auth != null && request.auth.token.email == email;
-      allow list, write: if false;
+      allow read, update, delete: if request.auth != null &&
+        request.auth.token.email in resource.data.memberEmails;
+      allow create: if request.auth != null &&
+        request.auth.token.email in request.resource.data.memberEmails;
     }
   }
 }

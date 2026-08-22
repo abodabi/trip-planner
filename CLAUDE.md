@@ -19,16 +19,17 @@ firebase deploy --only firestore:rules  # deploy security rules
 
 ## Architecture
 
-The entire app is four source files:
+The entire app is five source files:
 
 - `src/firebase.js` — Firebase initialization from `VITE_FB_*` env vars (`.env.local`, gitignored; template in `.env.example`), exports `auth`, `googleProvider`, `db`.
-- `src/App.jsx` — auth gate and data layer. Subscribes via `onSnapshot` to a **single Firestore document** (`trips/tatra-2026`) that holds all app state; seeds it with `defaultData()` on first run. Passes `data` and a `persist(next)` callback down — every mutation writes the whole document back with `setDoc`.
+- `src/App.jsx` — auth gate, trip selection (localStorage + `#/trip/<id>` hash links), and data layer. Subscribes via `onSnapshot` to **one Firestore document per trip** (`trips/{tripId}`) holding that trip's entire state. Passes `data` and a `persist(next)` callback down — every mutation writes the whole document back with `setDoc`. A permission error on subscribe returns the user to the picker.
+- `src/TripPicker.jsx` — "my trips" list (query `memberEmails array-contains` user email) and new-trip creation (`addDoc` of `defaultData(title, start, end)` + `memberEmails: [creator]`).
 - `src/TripPlanner.jsx` — the full UI (~650 lines): budget categories, expenses (EUR/ILS with conversion rate), per-day destination planning, CSV/JSON export, plus `defaultData()` defining the document shape.
 - `src/DestinationMap.jsx` — Leaflet/OpenStreetMap map of all destinations. Gets positions from stored `lat`/`lng` on the destination, else by parsing the Google Maps link, else by geocoding name+region via Nominatim (result persisted back to the doc as `lat`/`lng`).
 
 Key implications:
 - All state lives in one Firestore doc; there are no per-entity collections. Changing the data shape means updating `defaultData()` and being aware existing docs won't have new fields.
-- Access control: membership is a document per email in the Firestore `allowlist` collection (managed in the console, never from code). `firestore.rules` enforces it; `App.jsx` reads the signed-in user's own entry for the UX gate. No emails live in the repo.
+- Access control: per-trip. Each trip doc carries `memberEmails` (array) — `firestore.rules` checks it for read/update/delete, create requires including yourself. Members are managed in the app's trip settings; the array doubles as the trip-list query key. No emails live in the repo. Any Google account can sign in and create trips.
 - Styling is Tailwind utility classes mixed with inline `style` for the palette (dark green `#142E28`, cream `#F1F4EF`, etc.) and Hebrew fonts (Frank Ruhl Libre / Assistant). UI text is Hebrew; keep `dir="rtl"`.
 
 ## README

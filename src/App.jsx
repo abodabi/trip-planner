@@ -1,13 +1,27 @@
 import { useEffect, useState } from "react";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { auth, googleProvider, db } from "./firebase";
-import TripPlanner, { defaultData } from "./TripPlanner.jsx";
+import TripPlanner from "./TripPlanner.jsx";
+import TripPicker from "./TripPicker.jsx";
 
-const TRIP_DOC = doc(db, "trips", "tatra-2026");
+const LAST_TRIP_KEY = "tripPlanner:lastTripId";
+
+// Trips are linkable: <site>/#/trip/<tripId>. The link only works for members.
+function tripIdFromHash() {
+  const m = window.location.hash.match(/^#\/?trip\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+}
 
 export default function App() {
   const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  const [tripId, setTripId] = useState(() => tripIdFromHash() || localStorage.getItem(LAST_TRIP_KEY) || null);
+
+  useEffect(() => {
+    const onHash = () => setTripId(tripIdFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -17,51 +31,36 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Access is decided by the user's own entry in the Firestore `allowlist`
-  // collection (readable only by that user; see firestore.rules).
-  const [allowed, setAllowed] = useState(undefined); // undefined = checking
   useEffect(() => {
-    if (!user) { setAllowed(undefined); return; }
-    getDoc(doc(db, "allowlist", user.email))
-      .then((s) => setAllowed(s.exists()))
-      .catch(() => setAllowed(false));
-  }, [user]);
-
-  useEffect(() => {
-    if (!allowed) return;
+    if (!user || !tripId) { setData(null); return; }
+    setData(null);
+    setError(null);
     const unsub = onSnapshot(
-      TRIP_DOC,
+      doc(db, "trips", tripId),
       (snap) => {
-        if (snap.exists()) {
-          const d = snap.data();
-          let next = d, changed = false;
-          // Trip dates are defined in code (defaultData). The doc was seeded once,
-          // so reconcile it whenever the code's dates change.
-          const { start, end } = defaultData().meta;
-          if (d.meta?.start !== start || d.meta?.end !== end) {
-            next = { ...next, meta: { ...next.meta, start, end } };
-            changed = true;
-          }
-          if (changed) setDoc(TRIP_DOC, next).catch(() => setError("עדכון נתוני הטיול נכשל."));
-          setData(next);
-        } else {
-          // First time ever — seed the document.
-          const d = defaultData();
-          setDoc(TRIP_DOC, d).catch(() => setError("לא הצלחנו ליצור את מסמך הטיול הראשוני."));
-          setData(d);
-        }
+        if (!snap.exists()) { closeTrip(); return; } // trip deleted
+        setData(snap.data());
       },
-      (err) => {
-        console.error(err);
-        setError("החיבור למסד הנתונים נכשל. בדקו את חוקי ה-Firestore וההרשאות.");
-      }
+      () => closeTrip() // permission denied: removed from the trip, or a stale id
     );
     return () => unsub();
-  }, [allowed]);
+  }, [user, tripId]);
+
+  function openTrip(id) {
+    localStorage.setItem(LAST_TRIP_KEY, id);
+    window.history.replaceState(null, "", `#/trip/${id}`);
+    setTripId(id);
+  }
+  function closeTrip() {
+    localStorage.removeItem(LAST_TRIP_KEY);
+    window.history.replaceState(null, "", window.location.pathname);
+    setTripId(null);
+    setData(null);
+  }
 
   function persist(next) {
     setData(next);
-    setDoc(TRIP_DOC, next).catch(() => setError("שמירה נכשלה — בדקו את החיבור לרשת."));
+    setDoc(doc(db, "trips", tripId), next).catch(() => setError("שמירה נכשלה — בדקו את החיבור לרשת."));
   }
 
   async function handleSignIn() {
@@ -86,9 +85,9 @@ export default function App() {
       <Centered>
         <div style={{ background: "#fff", borderRadius: "20px" }} className="p-8 max-w-sm w-full text-center shadow-sm">
           <h1 style={{ fontFamily: "'Rubik', sans-serif", color: "#0F0F0F" }} className="text-2xl font-bold mb-2">
-            תקציב הטיול לטטרה
+            מתכנן הטיולים
           </h1>
-          <p style={{ color: "#767676" }} className="text-sm mb-6">כניסה עם חשבון גוגל מורשה בלבד</p>
+          <p style={{ color: "#767676" }} className="text-sm mb-6">תקציב, יעדים ותכנון יומי — משותף עם מי שמטיילים איתכם</p>
           <button
             onClick={handleSignIn}
             style={{ background: "#FF6935", color: "#fff" }}
@@ -102,28 +101,8 @@ export default function App() {
     );
   }
 
-  if (allowed === undefined) {
-    return (
-      <Centered>
-        <p style={{ color: "#343434" }} className="text-sm">בודק הרשאות…</p>
-      </Centered>
-    );
-  }
-
-  if (!allowed) {
-    return (
-      <Centered>
-        <div style={{ background: "#fff", borderRadius: "20px" }} className="p-8 max-w-sm w-full text-center shadow-sm">
-          <h1 style={{ color: "#EA1F33" }} className="text-lg font-bold mb-2">אין לך גישה</h1>
-          <p style={{ color: "#767676" }} className="text-sm mb-6">
-            החשבון {user.email} אינו ברשימת המורשים לכלי הזה.
-          </p>
-          <button onClick={() => signOut(auth)} style={{ background: "#F2F4F8", color: "#343434" }} className="w-full rounded-xl py-3 font-semibold text-sm">
-            התנתקות ונסיון עם חשבון אחר
-          </button>
-        </div>
-      </Centered>
-    );
+  if (!tripId) {
+    return <TripPicker userEmail={user.email} onOpen={openTrip} onSignOut={() => signOut(auth)} />;
   }
 
   return (
@@ -132,7 +111,9 @@ export default function App() {
       persist={persist}
       error={error}
       userEmail={user.email}
+      tripId={tripId}
       onSignOut={() => signOut(auth)}
+      onBack={closeTrip}
     />
   );
 }
