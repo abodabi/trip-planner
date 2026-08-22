@@ -1,0 +1,22 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Access is granted by document existence in the `allowlist` collection,
+    // keyed by the Google account email. Manage members in the Firebase console.
+    function isAllowed() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email));
+    }
+
+    match /trips/{tripId} {
+      allow read, write: if isAllowed();
+    }
+
+    // A signed-in user may check only their own allowlist entry (used by the
+    // app's access gate). Entries are managed manually — never from the client.
+    match /allowlist/{email} {
+      allow get: if request.auth != null && request.auth.token.email == email;
+      allow list, write: if false;
+    }
+  }
+}
