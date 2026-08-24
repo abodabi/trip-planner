@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
-import { ChevronDown, ChevronUp, Plus, Pencil, Trash2, Download, X, Check } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Pencil, Trash2, Download, Upload, FileDown, X, Check } from "lucide-react";
 import DestinationMap, { parseCoords, destCoords, DayRouteMap } from "./DestinationMap.jsx";
+import { parseDestinationsCsv, destinationsCsvTemplate, CSV_COLUMNS } from "./destinationsCsv.js";
 
 // Short place info + image, best-effort from Wikipedia (Hebrew first, then English).
 const WIKI_CACHE = new Map();
@@ -184,6 +185,7 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
   const [expenseSheet, setExpenseSheet] = useState(null);
   const [categorySheet, setCategorySheet] = useState(null);
   const [destSheet, setDestSheet] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [destRegionSel, setDestRegionSel] = useState([]); // empty = all
@@ -291,6 +293,13 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
     persist(next); setDestSheet(null);
   }
   function deleteDestination(id) { persist({ ...data, destinations: destinations.filter((d) => d.id !== id) }); setConfirmDelete(null); }
+  // Bulk add from a parsed CSV — one write for the whole batch, ids assigned here.
+  function importDestinations(newDests) {
+    if (!newDests.length) return;
+    const added = newDests.map((d, i) => ({ ...d, id: `${genId("dest")}_${i}` }));
+    persist({ ...data, destinations: [...destinations, ...added] });
+    setImportOpen(false);
+  }
   function setDestCoords(id, c) {
     persist({ ...data, destinations: destinations.map((d) => (d.id === id ? { ...d, lat: c.lat, lng: c.lng } : d)) });
   }
@@ -737,7 +746,7 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
             })}
           </div>
           {destinations.length === 0 ? (
-            <p style={{ color: "#9A9A9A" }} className="text-xs py-3 text-center">עוד אין יעדים. שלחו לי צילומי מסך או קובץ מהמפה כדי שאייבא, או הוסיפו יעד ראשון.</p>
+            <p style={{ color: "#9A9A9A" }} className="text-xs py-3 text-center">עוד אין יעדים. הוסיפו יעד ראשון, או ייבאו רשימה שלמה מקובץ CSV (יש תבנית להורדה).</p>
           ) : (
             <div className="flex flex-col gap-2">
               {filteredDest.map((d) => (
@@ -805,7 +814,10 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
               </div>
             </div>
           )}
-          <button onClick={() => setDestSheet({ mode: "new", priority: "3" })} style={{ background: "#fff", border: "1px solid #E0E3EA", color: "#FF6935" }} className="w-full rounded-xl py-2 text-xs font-semibold mt-3">＋ יעד חדש</button>
+          <div className="flex flex-col sm:flex-row gap-2 mt-3">
+            <button onClick={() => setDestSheet({ mode: "new", priority: "3" })} style={{ background: "#fff", border: "1px solid #E0E3EA", color: "#FF6935" }} className="flex-1 rounded-xl py-2.5 text-xs font-semibold">＋ יעד חדש</button>
+            <button onClick={() => setImportOpen(true)} style={{ background: "#fff", border: "1px solid #E0E3EA", color: "#FF6935" }} className="flex-1 rounded-xl py-2.5 text-xs font-semibold flex items-center justify-center gap-1.5"><Upload size={13} /> ייבוא יעדים מ-CSV</button>
+          </div>
         </Section>
 
         {/* MAP */}
@@ -837,6 +849,16 @@ export default function TripPlanner({ data, persist, error, onSignOut, userEmail
         onClose={() => setDestSheet(null)}
       >
         {destSheet && destSheet.mode !== "assign" && <DestinationForm initial={destSheet} onSave={saveDestination} />}
+      </Modal>
+
+      <Modal open={importOpen} title="ייבוא יעדים מקובץ CSV" onClose={() => setImportOpen(false)}>
+        {importOpen && (
+          <DestinationsImportForm
+            existingNames={destinations.map((d) => d.name)}
+            categories={DEST_CATEGORIES}
+            onImport={importDestinations}
+          />
+        )}
       </Modal>
 
       <Modal open={!!destSheet && destSheet.mode === "assign"} title="הוספה ליומן" onClose={() => setDestSheet(null)}>
@@ -1014,6 +1036,169 @@ function DestinationForm({ initial, onSave }) {
         style={{ background: valid ? "#FF6935" : "#C8C8C8", color: "#fff" }}
         className="w-full rounded-xl py-3 mt-1 font-semibold text-sm"
       >שמירה</button>
+    </div>
+  );
+}
+
+// Reads a CSV file as text. Excel on Hebrew Windows still writes windows-1255,
+// so fall back to it when the UTF-8 decode comes out with replacement chars.
+function readCsvFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read-failed"));
+    reader.onload = () => {
+      const buf = reader.result;
+      let text = new TextDecoder("utf-8").decode(buf);
+      if (text.includes("�")) {
+        try {
+          const alt = new TextDecoder("windows-1255").decode(buf);
+          if (!alt.includes("�")) text = alt;
+        } catch { /* decoder unavailable — keep the UTF-8 read */ }
+      }
+      resolve(text);
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function DestinationsImportForm({ existingNames, categories, onImport }) {
+  const [text, setText] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [readError, setReadError] = useState("");
+
+  // Re-parsing on every keystroke of a few hundred pasted rows is wasteful, so memoise it.
+  const existingKey = existingNames.join("|");
+  const result = useMemo(
+    () => (text.trim() ? parseDestinationsCsv(text, { existingNames, knownCategories: categories, parseCoords }) : null),
+    [text, existingKey, categories], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const newRows = result?.ok ? result.rows.filter((r) => r.status === "new") : [];
+  const dupRows = result?.ok ? result.rows.filter((r) => r.status === "duplicate") : [];
+  const badRows = result?.ok ? result.rows.filter((r) => r.status === "error") : [];
+  const warnRows = result?.ok ? result.rows.filter((r) => r.status !== "error" && r.messages.length > 0) : [];
+
+  function downloadTemplate() {
+    downloadBlob(destinationsCsvTemplate(categories), "destinations-template.csv", "text/csv;charset=utf-8;");
+  }
+
+  async function pickFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file after a fix
+    if (!file) return;
+    setReadError(""); setFileName(file.name);
+    try {
+      setText(await readCsvFile(file));
+    } catch {
+      setText(""); setReadError("לא הצלחנו לקרוא את הקובץ. נסו להעתיק את התוכן ולהדביק כאן.");
+    }
+  }
+
+  const STATUS_TONE = {
+    new: { bg: "#E9F7E4", color: "#3B8F2E", label: "חדש" },
+    duplicate: { bg: "#FFF3D0", color: "#94740A", label: "כבר קיים" },
+    error: { bg: "#FDE7EA", color: "#B31221", label: "שגיאה" },
+  };
+
+  return (
+    <div>
+      <p style={{ color: "#767676" }} className="text-xs mb-3 leading-relaxed">
+        מייבאים רשימת יעדים בפעם אחת. הורידו את התבנית, מלאו שורה לכל יעד ואז העלו את הקובץ.
+        עמודת <span style={{ fontWeight: 700 }}>"שם היעד"</span> היא היחידה שחייבת להיות מלאה, השאר אופציונלי.
+      </p>
+
+      <button onClick={downloadTemplate} style={{ background: "#E3F6F4", color: "#0B7A72", minHeight: "44px" }} className="w-full rounded-xl py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 mb-2">
+        <FileDown size={14} /> הורדת קובץ תבנית (CSV)
+      </button>
+
+      <label style={{ background: "#FF6935", color: "#fff", minHeight: "44px" }} className="w-full rounded-xl py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 mb-2 cursor-pointer">
+        <Upload size={14} /> בחירת קובץ CSV
+        <input
+          type="file"
+          accept=".csv,.txt,text/csv,text/plain,text/comma-separated-values,application/csv,application/vnd.ms-excel"
+          onChange={pickFile}
+          style={{ display: "none" }}
+          data-testid="csv-file-input"
+        />
+      </label>
+
+      <button onClick={() => setPasteOpen((v) => !v)} style={{ color: "#0E8F86" }} className="text-[11px] font-semibold underline mb-2">
+        {pasteOpen ? "סגירת ההדבקה" : "או הדבקת תוכן הקובץ כטקסט"}
+      </button>
+      {pasteOpen && (
+        <textarea
+          value={text}
+          onChange={(e) => { setText(e.target.value); setFileName(""); setReadError(""); }}
+          rows={5}
+          dir="ltr"
+          placeholder={CSV_COLUMNS.slice(0, 4).map((c) => c.header).join(",")}
+          style={inputStyle}
+          className={inputClass + " resize-none mb-2"}
+          data-testid="csv-paste"
+        />
+      )}
+
+      {fileName && <p style={{ color: "#767676" }} className="text-[11px] mb-2">📄 {fileName}</p>}
+      {readError && <p style={{ color: "#B31221" }} className="text-xs mb-2">{readError}</p>}
+
+      {result && !result.ok && (
+        <div style={{ background: "#FDE7EA", color: "#B31221" }} className="rounded-xl p-3 text-xs mb-2" data-testid="csv-error">{result.error}</div>
+      )}
+
+      {result?.ok && (
+        <div data-testid="csv-preview">
+          <div style={{ background: "#F2F4F8" }} className="rounded-xl p-3 mb-2">
+            <p style={{ color: "#0F0F0F" }} className="text-xs font-bold mb-1.5">נמצאו {result.rows.length} שורות</p>
+            <div className="flex flex-wrap gap-1.5 text-[11px] font-semibold">
+              <span style={{ background: STATUS_TONE.new.bg, color: STATUS_TONE.new.color }} className="rounded-full px-2.5 py-1" data-testid="count-new">{newRows.length} ייובאו</span>
+              {dupRows.length > 0 && <span style={{ background: STATUS_TONE.duplicate.bg, color: STATUS_TONE.duplicate.color }} className="rounded-full px-2.5 py-1" data-testid="count-dup">{dupRows.length} כבר קיימים</span>}
+              {badRows.length > 0 && <span style={{ background: STATUS_TONE.error.bg, color: STATUS_TONE.error.color }} className="rounded-full px-2.5 py-1" data-testid="count-bad">{badRows.length} שורות שגויות</span>}
+            </div>
+            {result.unknownColumns?.length > 0 && (
+              <p style={{ color: "#94740A" }} className="text-[11px] mt-1.5">עמודות שלא זוהו ולא יובאו: {result.unknownColumns.join(", ")}</p>
+            )}
+          </div>
+
+          <div style={{ maxHeight: "220px", overflowY: "auto" }} className="flex flex-col gap-1.5 mb-3">
+            {result.rows.map((r) => {
+              const t = STATUS_TONE[r.status];
+              return (
+                <div key={r.line} style={{ border: "1px solid #E9ECF2" }} className="rounded-xl px-2.5 py-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <p style={{ color: "#0F0F0F" }} className="text-xs font-bold flex-1">
+                      {r.name || <span style={{ color: "#9A9A9A", fontWeight: 500 }}>(ללא שם)</span>}
+                      <span style={{ color: "#9A9A9A", fontWeight: 500 }} className="text-[10px]"> · שורה {r.line}</span>
+                    </p>
+                    <span style={{ background: t.bg, color: t.color }} className="rounded-full px-2 py-0.5 text-[10px] font-bold shrink-0">{t.label}</span>
+                  </div>
+                  {r.dest && (r.dest.category || r.dest.region || r.dest.price > 0) && (
+                    <p style={{ color: "#767676" }} className="text-[11px]">
+                      {[r.dest.category, r.dest.region, r.dest.price > 0 ? `€${fmt(r.dest.price)}` : ""].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
+                  {r.messages.map((m, i) => (
+                    <p key={i} style={{ color: r.status === "error" ? "#B31221" : "#94740A" }} className="text-[11px]">⚠ {m}</p>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          {warnRows.length === 0 && badRows.length === 0 && newRows.length > 0 && (
+            <p style={{ color: "#3B8F2E" }} className="text-[11px] font-semibold mb-2 flex items-center gap-1"><Check size={12} /> כל השורות נקראו בלי בעיות</p>
+          )}
+        </div>
+      )}
+
+      <button
+        disabled={newRows.length === 0}
+        onClick={() => onImport(newRows.map((r) => r.dest))}
+        style={{ background: newRows.length ? "#FF6935" : "#C8C8C8", color: "#fff", minHeight: "48px" }}
+        className="w-full rounded-xl py-3 font-semibold text-sm"
+        data-testid="csv-import-btn"
+      >
+        {newRows.length ? `ייבוא ${newRows.length} יעדים` : "ייבוא"}
+      </button>
     </div>
   );
 }
