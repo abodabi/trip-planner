@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reading POC</string>
+    <string name="accessibility_service_description">בדיקת התמדה של שירות רקע לצורך אב-טיפוס אפליקציית קריאה. לא ניגש לתוכן מסך.</string>
+</resources>

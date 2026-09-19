@@ -5,3 +5,11 @@ dist
 .env
 .env.local
 .env.*.local
+
+# reading-poc-android (Android/Gradle)
+reading-poc-android/.gradle/
+reading-poc-android/**/build/
+reading-poc-android/local.properties
+reading-poc-android/.idea/
+reading-poc-android/*.iml
+reading-poc-android/**/*.iml

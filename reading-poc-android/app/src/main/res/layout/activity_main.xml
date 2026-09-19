@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:text="בדיקת תשתית לפני בניית אפליקציית הקריאה"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <!-- 1) Google Play Services -->
+        <Button
+            android:id="@+id/btnCheckGms"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="1. בדוק Google Play Services" />
+
+        <TextView
+            android:id="@+id/tvGmsResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:text="עדיין לא נבדק" />
+
+        <!-- 2) Speech recognition -->
+        <Button
+            android:id="@+id/btnStartSpeech"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="2. התחל בדיקת זיהוי דיבור (עברית)" />
+
+        <TextView
+            android:id="@+id/tvSpeechResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:text="עדיין לא נבדק. קרא בקול רם משפט קצר בעברית אחרי הלחיצה." />
+
+        <!-- 3) Accessibility service persistence -->
+        <Button
+            android:id="@+id/btnOpenAccessibilitySettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="3. פתח הגדרות נגישות (הפעל את השירות)" />
+
+        <TextView
+            android:id="@+id/tvHeartbeatResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Heartbeat אחרון: אין נתונים עדיין" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="אחרי הפעלת השירות, סגור את המסך הזה, חכה כמה שעות (או השאר את הטאבלט), וחזור לבדוק את זמן ה-heartbeat האחרון. אם הוא ממשיך להתעדכן - השירות שרד."
+            android:textSize="12sp" />
+
+    </LinearLayout>
+</ScrollView>
