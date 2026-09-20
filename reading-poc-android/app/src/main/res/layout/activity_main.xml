@@ -33,10 +33,30 @@
 
         <!-- 2) Speech recognition -->
         <Button
+            android:id="@+id/btnCheckSupportedLanguages"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="2א. בדוק אילו שפות זיהוי דיבור המכשיר תומך בהן" />
+
+        <TextView
+            android:id="@+id/tvSupportedLanguagesResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="עדיין לא נבדק" />
+
+        <Button
+            android:id="@+id/btnOpenVoiceInputSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="2ב. פתח הגדרות שפה/הקלדה (להוסיף עברית להקלדה קולית)" />
+
+        <Button
             android:id="@+id/btnStartSpeech"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="2. התחל בדיקת זיהוי דיבור (עברית)" />
+            android:layout_marginTop="12dp"
+            android:text="2ג. התחל בדיקת זיהוי דיבור (עברית)" />
 
         <TextView
             android:id="@+id/tvSpeechResult"
